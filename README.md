@@ -1,5 +1,5 @@
 # MARK-Key
-A authentication key for Mark ( Mutual Authentication to Resist Keylogging )  
+A authentication key for MARK ( Mutual Authentication to Resist Keylogging )  
 
 ## White Paper: http://dx.doi.org/10.1145/2663348
 
