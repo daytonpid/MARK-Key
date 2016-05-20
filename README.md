@@ -9,6 +9,6 @@ A authentication key for MARK ( Mutual Authentication to Resist Keylogging )
 
 ### TODO:
 
-Provide Documentation
+- [ ] Provide Documentation
 
-Update the outdated implementation for use with the latest Linux Kernel
+- [x] Update the outdated implementation for use with the latest Linux Kernel
