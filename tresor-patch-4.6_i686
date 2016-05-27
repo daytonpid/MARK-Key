@@ -1,0 +1,1798 @@
+diff --git a/Makefile b/Makefile
+index 0f9cb36..bcfecf1 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,7 +1,7 @@
+ VERSION = 4
+ PATCHLEVEL = 6
+ SUBLEVEL = 0
+-EXTRAVERSION =
++EXTRAVERSION = -tresor0.3
+ NAME = Charred Weasel
+ 
+ # *DOCUMENTATION*
+diff --git a/arch/x86/crypto/Makefile b/arch/x86/crypto/Makefile
+index b9b912a..e8598a2 100644
+--- a/arch/x86/crypto/Makefile
++++ b/arch/x86/crypto/Makefile
+@@ -25,6 +25,7 @@ obj-$(CONFIG_CRYPTO_SALSA20_X86_64) += salsa20-x86_64.o
+ obj-$(CONFIG_CRYPTO_CHACHA20_X86_64) += chacha20-x86_64.o
+ obj-$(CONFIG_CRYPTO_SERPENT_SSE2_X86_64) += serpent-sse2-x86_64.o
+ obj-$(CONFIG_CRYPTO_AES_NI_INTEL) += aesni-intel.o
++obj-$(CONFIG_CRYPTO_TRESOR) += tresor.o
+ obj-$(CONFIG_CRYPTO_GHASH_CLMUL_NI_INTEL) += ghash-clmulni-intel.o
+ 
+ obj-$(CONFIG_CRYPTO_CRC32C_INTEL) += crc32c-intel.o
+@@ -86,6 +87,7 @@ endif
+ 
+ aesni-intel-y := aesni-intel_asm.o aesni-intel_glue.o fpu.o
+ aesni-intel-$(CONFIG_64BIT) += aesni-intel_avx-x86_64.o aes_ctrby8_avx-x86_64.o
++tresor-y := tresor_asm.o tresor_glue.o tresor_key.o
+ ghash-clmulni-intel-y := ghash-clmulni-intel_asm.o ghash-clmulni-intel_glue.o
+ sha1-ssse3-y := sha1_ssse3_asm.o sha1_ssse3_glue.o
+ poly1305-x86_64-y := poly1305-sse2-x86_64.o poly1305_glue.o
+diff --git a/arch/x86/crypto/tresor_asm.S b/arch/x86/crypto/tresor_asm.S
+new file mode 100644
+index 0000000..358bb72
+--- /dev/null
++++ b/arch/x86/crypto/tresor_asm.S
+@@ -0,0 +1,493 @@
++/***************************************************************************
++ *
++ * Cold boot resistant AES-128 for 32-bit machines
++ * 
++ * Copyright (C) 2010	Tilo Mueller <tilo.mueller@informatik.uni-erlangen.de>
++ * Copyright (C) 2012	Johannes Goetzfried <johannes@jgoetzfried.de>
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
++ *
++ ***************************************************************************/
++
++.file "tresor_asm.S"
++
++/* 128-bit SSE registers */
++.set	rstate,	%xmm0		/* AES state */
++.set	rhelp,	%xmm1		/* helping register */
++.set	rk1,	%xmm2		/* round key  1 */
++.set	rk2,	%xmm3		/* round key  2 */
++.set	rk3,	%xmm4		/* round key  3 */
++.set	rk4,	%xmm5		/* round key  4 */
++.set	rk5,	%xmm6		/* round key  5 */
++.set	rk10,	%xmm7		/* round key 10 */
++
++/* 64-bit MMX registers */
++.set	rk6a,	%mm0		/* round key 6a */
++.set	rk6b,	%mm1		/* round key 6b */
++.set	rk7a,	%mm2		/* round key 7a */
++.set	rk7b,	%mm3		/* round key 7b */
++.set	rk8a,	%mm4		/* round key 8a */
++.set	rk8b,	%mm5		/* round key 8b */
++.set	rk9a,	%mm6		/* round key 9a */
++.set	rk9b,	%mm7		/* round key 9b */
++
++/* 32-bit debug registers */
++.set	db0,	%db0		/* round key 0a */
++.set	db1,	%db1		/* round key 0b */
++.set	db2,	%db2		/* round key 1a */
++.set	db3,	%db3		/* round key 1b */
++
++/* 32-bit GPR registers */
++.set	eax,	%eax
++.set	ebx,	%ebx
++.set	ecx,	%ecx
++.set	edx,	%edx
++.set	esi,	%esi
++.set	edi,	%edi
++.set	esp,	%esp
++.set	ebp,	%ebp
++
++
++/***************************************************************************
++ *  				DATA SEGMENT
++ ***************************************************************************/
++
++.data
++
++gfbd9e:	.long	0x00000000, 0x0b0d090e, 0x161a121c, 0x1d171b12
++	.long	0x2c342438, 0x27392d36, 0x3a2e3624, 0x31233f2a
++	.long	0x58684870, 0x5365417e, 0x4e725a6c, 0x457f5362
++	.long	0x745c6c48, 0x7f516546, 0x62467e54, 0x694b775a
++	.long	0xb0d090e0, 0xbbdd99ee, 0xa6ca82fc, 0xadc78bf2
++	.long	0x9ce4b4d8, 0x97e9bdd6, 0x8afea6c4, 0x81f3afca
++	.long	0xe8b8d890, 0xe3b5d19e, 0xfea2ca8c, 0xf5afc382
++	.long	0xc48cfca8, 0xcf81f5a6, 0xd296eeb4, 0xd99be7ba
++	.long	0x7bbb3bdb, 0x70b632d5, 0x6da129c7, 0x66ac20c9
++	.long	0x578f1fe3, 0x5c8216ed, 0x41950dff, 0x4a9804f1
++	.long	0x23d373ab, 0x28de7aa5, 0x35c961b7, 0x3ec468b9
++	.long	0x0fe75793, 0x04ea5e9d, 0x19fd458f, 0x12f04c81
++	.long	0xcb6bab3b, 0xc066a235, 0xdd71b927, 0xd67cb029
++	.long	0xe75f8f03, 0xec52860d, 0xf1459d1f, 0xfa489411
++	.long	0x9303e34b, 0x980eea45, 0x8519f157, 0x8e14f859
++	.long	0xbf37c773, 0xb43ace7d, 0xa92dd56f, 0xa220dc61
++	.long	0xf66d76ad, 0xfd607fa3, 0xe07764b1, 0xeb7a6dbf
++	.long	0xda595295, 0xd1545b9b, 0xcc434089, 0xc74e4987
++	.long	0xae053edd, 0xa50837d3, 0xb81f2cc1, 0xb31225cf
++	.long	0x82311ae5, 0x893c13eb, 0x942b08f9, 0x9f2601f7
++	.long	0x46bde64d, 0x4db0ef43, 0x50a7f451, 0x5baafd5f
++	.long	0x6a89c275, 0x6184cb7b, 0x7c93d069, 0x779ed967
++	.long	0x1ed5ae3d, 0x15d8a733, 0x08cfbc21, 0x03c2b52f
++	.long	0x32e18a05, 0x39ec830b, 0x24fb9819, 0x2ff69117
++	.long	0x8dd64d76, 0x86db4478, 0x9bcc5f6a, 0x90c15664
++	.long	0xa1e2694e, 0xaaef6040, 0xb7f87b52, 0xbcf5725c
++	.long	0xd5be0506, 0xdeb30c08, 0xc3a4171a, 0xc8a91e14
++	.long	0xf98a213e, 0xf2872830, 0xef903322, 0xe49d3a2c
++	.long	0x3d06dd96, 0x360bd498, 0x2b1ccf8a, 0x2011c684
++	.long	0x1132f9ae, 0x1a3ff0a0, 0x0728ebb2, 0x0c25e2bc
++	.long	0x656e95e6, 0x6e639ce8, 0x737487fa, 0x78798ef4
++	.long	0x495ab1de, 0x4257b8d0, 0x5f40a3c2, 0x544daacc
++	.long	0xf7daec41, 0xfcd7e54f, 0xe1c0fe5d, 0xeacdf753
++	.long	0xdbeec879, 0xd0e3c177, 0xcdf4da65, 0xc6f9d36b
++	.long	0xafb2a431, 0xa4bfad3f, 0xb9a8b62d, 0xb2a5bf23
++	.long	0x83868009, 0x888b8907, 0x959c9215, 0x9e919b1b
++	.long	0x470a7ca1, 0x4c0775af, 0x51106ebd, 0x5a1d67b3
++	.long	0x6b3e5899, 0x60335197, 0x7d244a85, 0x7629438b
++	.long	0x1f6234d1, 0x146f3ddf, 0x097826cd, 0x02752fc3
++	.long	0x335610e9, 0x385b19e7, 0x254c02f5, 0x2e410bfb
++	.long	0x8c61d79a, 0x876cde94, 0x9a7bc586, 0x9176cc88
++	.long	0xa055f3a2, 0xab58faac, 0xb64fe1be, 0xbd42e8b0
++	.long	0xd4099fea, 0xdf0496e4, 0xc2138df6, 0xc91e84f8
++	.long	0xf83dbbd2, 0xf330b2dc, 0xee27a9ce, 0xe52aa0c0
++	.long	0x3cb1477a, 0x37bc4e74, 0x2aab5566, 0x21a65c68
++	.long	0x10856342, 0x1b886a4c, 0x069f715e, 0x0d927850
++	.long	0x64d90f0a, 0x6fd40604, 0x72c31d16, 0x79ce1418
++	.long	0x48ed2b32, 0x43e0223c, 0x5ef7392e, 0x55fa3020
++	.long	0x01b79aec, 0x0aba93e2, 0x17ad88f0, 0x1ca081fe
++	.long	0x2d83bed4, 0x268eb7da, 0x3b99acc8, 0x3094a5c6
++	.long	0x59dfd29c, 0x52d2db92, 0x4fc5c080, 0x44c8c98e
++	.long	0x75ebf6a4, 0x7ee6ffaa, 0x63f1e4b8, 0x68fcedb6
++	.long	0xb1670a0c, 0xba6a0302, 0xa77d1810, 0xac70111e
++	.long	0x9d532e34, 0x965e273a, 0x8b493c28, 0x80443526
++	.long	0xe90f427c, 0xe2024b72, 0xff155060, 0xf418596e
++	.long	0xc53b6644, 0xce366f4a, 0xd3217458, 0xd82c7d56
++	.long	0x7a0ca137, 0x7101a839, 0x6c16b32b, 0x671bba25
++	.long	0x5638850f, 0x5d358c01, 0x40229713, 0x4b2f9e1d
++	.long	0x2264e947, 0x2969e049, 0x347efb5b, 0x3f73f255
++	.long	0x0e50cd7f, 0x055dc471, 0x184adf63, 0x1347d66d
++	.long	0xcadc31d7, 0xc1d138d9, 0xdcc623cb, 0xd7cb2ac5
++	.long	0xe6e815ef, 0xede51ce1, 0xf0f207f3, 0xfbff0efd
++	.long	0x92b479a7, 0x99b970a9, 0x84ae6bbb, 0x8fa362b5
++	.long	0xbe805d9f, 0xb58d5491, 0xa89a4f83, 0xa397468d
++
++.align	128
++rc_tab:	.long	0x00000001, 0x00000002, 0x00000004, 0x00000008
++	.long	0x00000010, 0x00000020, 0x00000040, 0x00000080
++	.long	0x0000001b, 0x00000036
++
++/* external tables from generic aes code */
++.set	ft_tab, crypto_ft_tab
++.set	fl_tab, crypto_fl_tab
++.set	it_tab, crypto_it_tab
++.set	il_tab, crypto_il_tab
++
++
++/***************************************************************************
++ *  				MACROs
++ ***************************************************************************/
++
++/* function prologue */ 
++.macro prolog
++	/* enter */
++	push		ebp
++	movl		esp,ebp
++	pusha
++	/* get input */
++	movl		12(ebp),eax
++	movdqu		0(eax),rstate
++.endm
++
++/* function epilogue */
++.macro epilog
++	/* write output */
++	movl		8(ebp),eax
++	movdqu		rstate,0(eax)
++	/* reset XMM registers */
++	pxor		%xmm0,%xmm0
++	pxor		%xmm1,%xmm1
++	pxor		%xmm2,%xmm2
++	pxor		%xmm3,%xmm3
++	pxor		%xmm4,%xmm4
++	pxor		%xmm5,%xmm5
++	pxor		%xmm6,%xmm6
++	pxor		%xmm7,%xmm7
++	/* reset MMX registers */
++	pxor		%mm0,%mm0
++	pxor		%mm1,%mm1
++	pxor		%mm2,%mm2
++	pxor		%mm3,%mm3
++	pxor		%mm4,%mm4
++	pxor		%mm5,%mm5
++	pxor		%mm6,%mm6
++	pxor		%mm7,%mm7
++	/* leave */
++	popa
++	pop		ebp
++	ret
++.endm
++
++/* copy one 128-bit sse register into two 64-bit mmx registers */
++.macro	sse_to_mmx sse mmx0 mmx1
++	movdqu		\sse,rhelp
++	movdq2q		rhelp,\mmx0
++	psrldq		$8,rhelp
++	movdq2q		rhelp,\mmx1
++.endm
++
++/* copy two 64-bit mmx registers into one 128-bit sse register */
++.macro	mmx_to_sse mmx0 mmx1 sse
++	movq2dq		\mmx0,\sse
++	movq2dq		\mmx1,rhelp
++	pslldq		$8,rhelp
++	pxor		rhelp,\sse
++.endm
++
++/* copy four 32-bit debug registers into one 128-bit sse register */
++.macro	dbg_to_sse dbg0 dbg1 dbg2 dbg3 sse
++	movl		\dbg0,eax
++	movd		eax,\sse
++	movl		\dbg1,eax
++	movd		eax,rhelp
++	pslldq		$4,rhelp
++	pxor		rhelp,\sse
++	movl		\dbg2,eax
++	movd		eax,rhelp
++	pslldq		$8,rhelp
++	pxor		rhelp,\sse
++	movl		\dbg3,eax
++	movd		eax,rhelp
++	pslldq		$12,rhelp
++	pxor		rhelp,\sse
++.endm
++
++/* copy four 32-bit general purpose registers into one 128-bit sse register */
++.macro	gpr_to_sse gpr0 gpr1 gpr2 gpr3 sse
++	movd		\gpr0,\sse
++	pslldq		$4,\sse
++	movd		\gpr1,rhelp
++	por		rhelp,\sse
++	pslldq		$4,\sse
++	movd		\gpr2,rhelp
++	por		rhelp,\sse
++	pslldq		$4,\sse
++	movd		\gpr3,rhelp
++	por		rhelp,\sse
++.endm
++
++/* xor sbox(key[index]) onto edx */
++.macro	ks_box index rk init
++	movdqu		\rk,rhelp
++	psrldq		$\index,rhelp	
++	movd		rhelp,eax
++	andl		$0x000000ff,eax
++	.if \init
++		movzx	ft_tab+1(,eax,4),edx
++	.else
++		xorb	ft_tab+1(,eax,4),%dl
++	.endif
++.endm
++
++/* generate next round key */
++.macro	generate_rk oldrk rk
++	movdqu		\oldrk,\rk
++	/*
++	k[0] ^= s_box(k[13]) ^ rc;
++	k[1] ^= s_box(k[14]);
++	k[2] ^= s_box(k[15]);
++	k[3] ^= s_box(k[12]);
++	*/
++	ks_box		12,\rk,1
++	shl		$8,edx
++	ks_box		15,\rk,0
++	shl		$8,edx
++	ks_box		14,\rk,0
++	shl		$8,edx
++	ks_box		13,\rk,0
++	xorl		rc_tab(,ecx,4),edx
++	movd		edx,rhelp
++	pxor		rhelp,\rk
++	/*
++	for(cc = 4; cc < 16; cc += 4 )
++		k[cc + 0] ^= k[cc - 4];
++		k[cc + 1] ^= k[cc - 3];
++		k[cc + 2] ^= k[cc - 2];
++		k[cc + 3] ^= k[cc - 1];
++	*/
++	movdqu		\rk,rhelp
++	pslldq		$4,rhelp
++	pxor		rhelp,\rk
++	pslldq		$4,rhelp
++	pxor		rhelp,\rk
++	pslldq		$4,rhelp
++	pxor		rhelp,\rk
++	/* increment RC (round constant) counter */
++	inc		ecx
++.endm
++
++/* common code for inv_mix_column */
++.macro inv_mix_helper r l reg init
++	psrldq		$\r,rhelp
++	movd		rhelp,eax
++	andl		$0x000000ff,eax
++	movl		gfbd9e(,eax,4),eax
++	rol		$\l,eax
++	.if \init
++		movl	eax,\reg
++	.else
++		xorl	eax,\reg
++	.endif
++.endm
++
++/* reg[3] = (gfmb(sse[c]) ^ gfmd(sse[c+1]) ^ gfm9(sse[c+2]) ^ gfme(sse[c+3]));
++ * reg[2] = (gfmd(sse[c]) ^ gfm9(sse[c+1]) ^ gfme(sse[c+2]) ^ gfmb(sse[c+3]));
++ * reg[1] = (gfm9(sse[c]) ^ gfme(sse[c+1]) ^ gfmb(sse[c+2]) ^ gfmd(sse[c+3]));
++ * reg[0] = (gfme(sse[c]) ^ gfmb(sse[c+1]) ^ gfmd(sse[c+2]) ^ gfm9(sse[c+3])); */
++.macro	inv_mix_column ssereg reg c
++	movdqu		\ssereg,rhelp		
++	inv_mix_helper	\c, 0,\reg,1
++	inv_mix_helper	 1, 8,\reg,0
++	inv_mix_helper	 1,16,\reg,0
++	inv_mix_helper	 1,24,\reg,0
++.endm
++
++/* add mixed key */
++.macro add_mixed_key rk
++	/* mix key */
++	inv_mix_column	\rk,ebx,0
++	inv_mix_column	\rk,edx,4
++	inv_mix_column	\rk,edi,8
++	inv_mix_column	\rk,esi,12
++	/* add key */
++	movd		ebx,rhelp
++	pxor		rhelp,rstate
++	movd		edx,rhelp
++	pslldq		$4,rhelp
++	pxor		rhelp,rstate
++	movd		edi,rhelp
++	pslldq		$8,rhelp
++	pxor		rhelp,rstate
++	movd		esi,rhelp
++	pslldq		$12,rhelp
++	pxor		rhelp,rstate
++.endm
++
++/* common code for f_rn */
++.macro	f_rn_helper tab r off reg init
++	movdqu		rstate,rhelp
++	psrldq		$\r,rhelp
++	movd		rhelp,eax
++	andl		$0x000000ff,eax
++	.if \init
++		movl	\tab+\off(,eax,4),\reg
++	.else
++		xorl	\tab+\off(,eax,4),\reg
++	.endif
++.endm
++
++/* reg = tab[0][state[i]] ^ tab[1][state[j]] 
++ *     ^ tab[2][state[k]] ^ tab[3][state[l]] */
++.macro	f_rn tab i j k l reg
++	f_rn_helper	\tab,\i,   0,\reg,1	/* tab[0][state[i]] */
++	f_rn_helper	\tab,\j,1024,\reg,0	/* tab[1][state[j]] */
++	f_rn_helper	\tab,\k,2048,\reg,0	/* tab[2][state[k]] */
++	f_rn_helper	\tab,\l,3072,\reg,0	/* tab[3][state[l]] */
++.endm
++
++/* general forward round */
++.macro	f_round tab
++	f_rn		\tab, 0, 5,10,15,ebx
++	f_rn		\tab, 4, 9,14, 3,edx
++	f_rn		\tab, 8,13, 2, 7,edi
++	f_rn		\tab,12, 1, 6,11,esi
++	gpr_to_sse	esi,edi,edx,ebx,rstate
++.endm
++
++/* forward normal round */
++.macro	f_nround rk
++	f_round		ft_tab
++	pxor		\rk,rstate
++.endm
++.macro	f_nround_ rka rkb rkhelp
++	f_round		ft_tab
++	mmx_to_sse	\rka,\rkb,\rkhelp
++	pxor		\rkhelp,rstate
++.endm
++
++/* forward last round */
++.macro	f_lround rk
++	f_round		fl_tab 
++	pxor		\rk,rstate
++.endm
++
++/* general inversed round */
++.macro	i_round tab
++	f_rn		\tab, 0,13,10, 7,ebx
++	f_rn		\tab, 4, 1,14,11,edx
++	f_rn		\tab, 8, 5, 2,15,edi
++	f_rn		\tab,12, 9, 6, 3,esi
++	gpr_to_sse	esi,edi,edx,ebx,rstate
++.endm
++
++/* inversed normal round */
++.macro	i_nround rk
++	i_round		it_tab
++	add_mixed_key	\rk
++.endm
++.macro	i_nround_ rka rkb rkhelp
++	i_round		it_tab
++	mmx_to_sse	\rka,\rkb,\rkhelp
++	add_mixed_key	\rkhelp
++.endm
++
++/* inversed last round */
++.macro	i_lround rk
++	i_round 	il_tab 
++	pxor		\rk,rstate
++.endm
++
++/* generate AES-128 key schedule (rk1 to rk10) */
++.macro	key_schedule
++	/* Generate rk1 to rk5 */
++	xorl		ecx,ecx
++	generate_rk	rk1,rk1
++	generate_rk	rk1,rk2
++	generate_rk	rk2,rk3
++	generate_rk	rk3,rk4
++	generate_rk	rk4,rk5
++	/* Generate rk6 to rk9 */
++	generate_rk	rk5,rk10
++	sse_to_mmx	rk10,rk6a,rk6b
++	generate_rk	rk10,rk10
++	sse_to_mmx	rk10,rk7a,rk7b	
++	generate_rk	rk10,rk10
++	sse_to_mmx	rk10,rk8a,rk8b	
++	generate_rk	rk10,rk10
++	sse_to_mmx	rk10,rk9a,rk9b	
++	/* Generate rk10 */
++	generate_rk	rk10,rk10
++.endm
++
++
++/***************************************************************************
++ *	  			CODE SEGMENT
++ **************************************************************************/
++
++.text
++	.global		tresor_set_key
++	.global		tresor_encblk_128
++	.global		tresor_decblk_128
++	.extern		crypto_ft_tab
++	.extern		crypto_fl_tab
++	.extern		crypto_it_tab
++	.extern		crypto_il_tab
++
++/* void tresor_encblk_128(u8 *out, const u8 *in) */
++tresor_encblk_128:
++	prolog 
++	dbg_to_sse	db0,db1,db2,db3,rk1
++	pxor		rk1,rstate
++	key_schedule
++	f_nround	rk1
++	f_nround	rk2
++	f_nround	rk3
++	f_nround	rk4
++	f_nround	rk5
++	f_nround_	rk6a,rk6b,rk5
++	f_nround_	rk7a,rk7b,rk5
++	f_nround_	rk8a,rk8b,rk5
++	f_nround_	rk9a,rk9b,rk5
++	f_lround	rk10
++	epilog
++
++/* void tresor_decblk_128(u8 *out, const u8 *in) */
++tresor_decblk_128:
++	prolog
++	dbg_to_sse	db0,db1,db2,db3,rk1
++	key_schedule
++	pxor		rk10,rstate
++	i_nround_	rk9a,rk9b,rk10
++	i_nround_	rk8a,rk8b,rk10
++	i_nround_	rk7a,rk7b,rk10
++	i_nround_	rk6a,rk6b,rk10
++	i_nround	rk5
++	i_nround	rk4
++	i_nround	rk3
++	i_nround	rk2
++	i_nround	rk1
++	dbg_to_sse	db0,db1,db2,db3,rk1
++	i_lround	rk1
++	epilog
++
++/* void tresor_set_key(const u8 *in_key) */
++tresor_set_key:
++	movl		4(esp),edx
++	movl		0(edx),eax
++	movl		eax,db0
++	movl		4(edx),eax
++	movl		eax,db1
++	movl		8(edx),eax
++	movl		eax,db2
++	movl		12(edx),eax
++	movl		eax,db3
++	xorl		eax, eax
++	ret
+diff --git a/arch/x86/crypto/tresor_glue.c b/arch/x86/crypto/tresor_glue.c
+new file mode 100644
+index 0000000..75cd4ba
+--- /dev/null
++++ b/arch/x86/crypto/tresor_glue.c
+@@ -0,0 +1,165 @@
++/*
++ * Cold boot resistant AES-128 for 32-bit machines
++ *
++ * Copyright (C) 2010	Tilo Mueller <tilo.mueller@informatik.uni-erlangen.de>
++ * Copyright (C) 2012	Hans Spath <tresor@hans-spath.de>
++ * Copyright (C) 2012	Johannes Goetzfried <johannes@jgoetzfried.de>
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
++ */
++
++#include <crypto/algapi.h>
++#include <crypto/tresor.h>
++#include <linux/module.h>
++#include <crypto/aes.h>
++#include <linux/smp.h>
++
++
++/*
++ * Assembly functions implemented in tresor-intel_asm.S
++ */
++asmlinkage void tresor_set_key(const u8 *in_key);
++asmlinkage void tresor_encblk_128(u8 *out, const u8 *in);
++asmlinkage void tresor_decblk_128(u8 *out, const u8 *in);
++
++
++
++/*
++ * Set-key pseudo function: Setting the real key for TRESOR must be done
++ * separately. This is because of the kernel crypto API's key management,
++ * which stores the key in RAM. We don't want to have the actual key in RAM, so
++ * we give only a fake-key to the kernel key management.
++ */
++static int tresor_setdummykey(struct crypto_tfm *tfm, const u8 *in_key,
++							unsigned int key_len)
++{
++	struct crypto_aes_ctx *ctx = crypto_tfm_ctx(tfm);
++
++	if( key_len != AES_KEYSIZE_128 )
++		return -EINVAL;
++
++	ctx->key_length = key_len;
++	return 0;
++}
++
++
++/*
++ * Prolog: enter atomic section
++ */
++static inline void tresor_prolog(unsigned long *irq_flags)
++{
++	/* disable scheduler */
++	preempt_disable();
++	/* Calling local_irq_save saves and disables interrupts */
++	local_irq_save(*irq_flags);
++}
++
++
++/*
++ * Epilog: leave atomic section
++ */
++static inline void tresor_epilog(unsigned long *irq_flags)
++{
++	local_irq_restore(*irq_flags);
++	preempt_enable();
++}
++
++
++/*
++ * Encrypt one block
++ */
++void tresor_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
++{
++	unsigned long irq_flags;
++
++	tresor_prolog(&irq_flags);
++	tresor_encblk_128(dst, src);
++	tresor_epilog(&irq_flags);
++}
++
++
++/*
++ * Decrypt one block
++ */
++void tresor_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src)
++{
++	unsigned long irq_flags;
++
++	tresor_prolog(&irq_flags);
++	tresor_decblk_128(dst, src);
++	tresor_epilog(&irq_flags);
++}
++
++
++/*
++ * Set AES key (the real function this time, not dummy as above)
++ */
++static void tresor_setkey_current_cpu(void *data)
++{
++	printk(KERN_DEBUG "TRESOR: %s running on cpu %d\n",
++		__func__, smp_processor_id());
++	tresor_set_key((const u8 *)data);
++}
++
++void tresor_setkey(const u8 *in_key)
++{
++	on_each_cpu(tresor_setkey_current_cpu, (void *)in_key, 1);
++}
++
++
++/*
++ * Crypto API algorithm
++ */
++static struct crypto_alg tresor_alg = {
++	.cra_name		= "tresor",
++	.cra_driver_name	= "tresor-driver",
++	.cra_priority		= 100,
++	.cra_flags		= CRYPTO_ALG_TYPE_CIPHER,
++	.cra_blocksize		= AES_BLOCK_SIZE,
++	.cra_ctxsize		= sizeof(struct crypto_aes_ctx),
++	.cra_alignmask		= 3,
++	.cra_module		= THIS_MODULE,
++	.cra_list		= LIST_HEAD_INIT(tresor_alg.cra_list),
++	.cra_u	= {
++		.cipher	= {
++			.cia_min_keysize	= AES_MIN_KEY_SIZE,
++			.cia_max_keysize	= AES_MIN_KEY_SIZE,
++			.cia_setkey		= tresor_setdummykey,
++			.cia_encrypt		= tresor_encrypt,
++			.cia_decrypt		= tresor_decrypt
++		}
++	}
++};
++
++
++/* Initialize module */
++static int __init tresor_init(void)
++{
++	int retval;
++	retval = crypto_register_alg(&tresor_alg);
++	return retval;
++}
++module_init(tresor_init);
++
++
++/* Remove module */
++static void __exit tresor_fini(void)
++{
++	crypto_unregister_alg(&tresor_alg);
++}
++module_exit(tresor_fini);
++
++
++/* Support TRESOR testing module  */
++EXPORT_SYMBOL(tresor_setkey);
+diff --git a/arch/x86/crypto/tresor_key.c b/arch/x86/crypto/tresor_key.c
+new file mode 100644
+index 0000000..f3fc939
+--- /dev/null
++++ b/arch/x86/crypto/tresor_key.c
+@@ -0,0 +1,553 @@
++/*
++ * TRESOR password prompt and key derivation
++ *
++ * Copyright (C) 2010 Tilo Mueller <tilo.mueller@informatik.uni-erlangen.de>
++ * Copyright (C) 2012 Hans Spath <tresor@hans-spath.de>
++ * Copyright (C) 2012 Johannes Goetzfried <johannes@jgoetzfried.de>
++ *
++ * This program is free software; you can redistribute it and/or modify it
++ * under the terms and conditions of the GNU General Public License,
++ * version 2, as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope it will be useful, but WITHOUT
++ * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
++ * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
++ * more details.
++ *
++ * You should have received a copy of the GNU General Public License along with
++ * this program; if not, write to the Free Software Foundation, Inc., 59 Temple
++ * Place - Suite 330, Boston, MA 02111-1307 USA.
++ */
++
++#include <crypto/tresor.h>
++#include <linux/fd.h>
++#include <linux/init.h>
++#include <linux/jiffies.h>
++#include <linux/kbd_kern.h>
++#include <linux/kernel.h>
++#include <linux/kobject.h>
++#include <linux/module.h>
++#include <linux/oom.h>
++#include <linux/string.h>
++#include <linux/syscalls.h>
++#include <linux/sysfs.h>
++#include <linux/tty.h>
++#include <stdarg.h>
++
++int term_fd;
++unsigned char key_hash[32];
++
++/* SHA256 Macros */
++#define	rot(x, n)	(((x) >> n) | ((x) << (32 - n)))
++#define	shr(x, n)	(((x) >> n))
++#define s0(x)		(rot(x,  7) ^ rot(x, 18) ^ shr(x,  3))
++#define s1(x)		(rot(x, 17) ^ rot(x, 19) ^ shr(x, 10))
++#define S0(x)		(rot(x,  2) ^ rot(x, 13) ^ rot(x, 22))
++#define S1(x)		(rot(x,  6) ^ rot(x, 11) ^ rot(x, 25))
++#define ch(x, y, z)	(((x) & (y)) ^ ((~x) & (z)))
++#define maj(x, y, z)	(((x) & (y)) ^ ((x) & (z)) ^ ((y) & (z)))
++#define endian(x)	(((x)>>24) | ((x)>>8 & 0x0000FF00) |\
++			 ((x)<<24) | ((x)<<8 & 0x00FF0000))
++
++/* SHA256 Constants */
++static const uint32_t k[64] = {
++	0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b,
++	0x59f111f1, 0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01,
++	0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7,
++	0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
++	0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152,
++	0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
++	0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
++	0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
++	0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819,
++	0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116, 0x1e376c08,
++	0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f,
++	0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
++	0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2
++};
++
++/*
++ * Key derivation function: SHA-256.
++ *
++ * About key strenthening: Unfortunately, there is no easy way to store a salt
++ * value on disk early during boot. We can only increase the number of SHA-256
++ * iterations to strengthen the key.
++ *
++ * So use safe passwords / passphrases for TRESOR. All printable ASCII chars are
++ * allowed and passwords are only restricted to 53 chars.
++ *
++ * Paramter:
++ *	- message:  A max. 53 char's long message.
++ *		    (more characters are just ignored)
++ *	- digest:   A 32 char's long array, where the
++ *		    message digest is stored.
++ */
++static void sha256(const char *message, int msglen, unsigned char *digest)
++{
++	     int i;
++	 uint8_t chunk[64];
++	uint32_t w[64];
++	uint32_t a, b, c, d, e, f, g, h;
++	uint32_t t1, t2;
++	uint32_t *hash = (uint32_t *) digest;
++
++	/* Restrict to 53 characters */
++	msglen = (msglen > 53) ? 53 : msglen;
++
++	/* Pre-processing: Build chunk[] */
++	for (i = 0; i < msglen; i++)
++		chunk[i] = message[i];
++	chunk[i++] = 0x80;
++	for (; i < 62; i++)
++		chunk[i] = 0x00;
++	for (; i < 64; i++)
++		chunk[i] = (uint8_t)(msglen*8 >> (63-i)*8);
++
++	/* Build w[]: Extend 16 dwords to 64 dwords */
++	for (i = 0; i < 16; i++)
++		w[i] =	chunk[i*4+0] << 24 |
++			chunk[i*4+1] << 16 |
++			chunk[i*4+2] <<  8 |
++			chunk[i*4+3] ;
++	for (i = 16; i < 64; i++)
++		w[i] =	     w[i - 16]
++			+ s0(w[i - 15])
++			+    w[i - 7]
++			+ s1(w[i - 2]);
++
++	/* Initialize hash value of the chunk */
++	hash[0] = 0x6a09e667;	a = hash[0];
++	hash[1] = 0xbb67ae85;	b = hash[1];
++	hash[2] = 0x3c6ef372;	c = hash[2];
++	hash[3] = 0xa54ff53a;	d = hash[3];
++	hash[4] = 0x510e527f;	e = hash[4];
++	hash[5] = 0x9b05688c;	f = hash[5];
++	hash[6] = 0x1f83d9ab;	g = hash[6];
++	hash[7] = 0x5be0cd19;	h = hash[7];
++
++	/* Main loop */
++	for (i = 0; i < 64; i++) {
++		t1 = h + S1(e) + ch(e, f, g) + k[i] + w[i];
++		t2 = S0(a) + maj(a, b, c);
++		h = g; g = f;
++		f = e; e = d + t1;
++		d = c; c = b;
++		b = a; a = t1 + t2;
++	}
++
++	/* Add the chunks hash to the result */
++	hash[0] += a; hash[1] += b;
++	hash[2] += c; hash[3] += d;
++	hash[4] += e; hash[5] += f;
++	hash[6] += g; hash[7] += h;
++
++	/* Align endian */
++	hash[0] = endian(hash[0]); hash[1] = endian(hash[1]);
++	hash[2] = endian(hash[2]); hash[3] = endian(hash[3]);
++	hash[4] = endian(hash[4]); hash[5] = endian(hash[5]);
++	hash[6] = endian(hash[6]); hash[7] = endian(hash[7]);
++
++	/* Reset critical memory locations */
++	msglen = 0; t1 = 0; t2 = 0;
++	a = 0; b = 0; c = 0; d = 0;
++	e = 0; f = 0; g = 0; h = 0;
++	memset(chunk, 0, 64);
++	memset(w, 0, 64);
++	wbinvd();
++}
++
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++/* Print to term_fd */
++static int printf_(const char *fmt, ...)
++{
++	va_list args; int col = 80; char line[col];
++
++	va_start(args, fmt);
++	vsnprintf(line, col, fmt, args);
++	line[col-1] = 0;
++	va_end(args);
++
++	return sys_write(term_fd, line, strlen(line));
++}
++
++/* Erase line before printing (workaround for weird consoles) */
++static int printf(const char *fmt, ...)
++{
++	va_list args; int res;
++
++	printf_("\x1B[0G");
++	va_start(args, fmt);
++	res = printf_(fmt, args);
++	va_end(args);
++
++	return res;
++}
++
++/* Read from term_fd */
++static unsigned char getchar(void)
++{
++	unsigned char c;
++	sys_read(term_fd, &c, 1);
++	return c;
++}
++
++/* Clear term_fd */
++static int cls(void)
++{
++	int i;
++	i  = printf_("\n");
++	i += printf_("\x1B[2J");
++	i += printf_("\x1B[100A");
++	return i;
++}
++
++/* Disables the cursor of term_fd */
++static void cursor_disable(void)
++{
++	printf_("\x1B[?1c");
++}
++
++/* Enables the cursor of term_fd */
++static void cursor_enable(void)
++{
++	printf_("\x1B[?6c");
++}
++
++/* Resets the cursor of term_fd to default */
++static void cursor_reset(void)
++{
++	printf_("\x1B[?0c");
++}
++
++/*
++ * Password prompt
++ *
++ * Returns an error code smaller zero if the terminal
++ * cannot be opened and zero otherwise.
++ */
++int tresor_readkey(const char *terminal, int resume)
++{
++	unsigned char password[54], key[32], key_hash_[32], answer[4], c;
++	struct termios termios;
++	mm_segment_t ofs;
++	int i, j, progress;
++
++	/* prepare to call systemcalls from kernelspace */
++	ofs = get_fs();
++	set_fs(get_ds());
++	/* try to open terminal */
++	term_fd = sys_open(terminal, O_RDWR, 0);
++	if (term_fd < 0) {
++		set_fs(ofs);
++		return term_fd;
++	}
++	/* read single characters; no echo */
++	sys_ioctl(term_fd, TCGETS, (long)&termios);
++	termios.c_lflag &= ~(ICANON | ECHO);
++	sys_ioctl(term_fd, TCSETSF, (long)&termios);
++	/* initialize console */
++	cursor_enable();
++	cls();
++
++readkey:
++	/* Read password */
++	printf("\n >> TRESOR <<");
++	i = 0;
++	printf("\n\n Enter password  \t> ");
++	while (1) {
++		c = getchar();
++
++		/* Backspace */
++		if (i > 0 && (c == 0x7f || c == 0x08)) {
++			printf_("\b \b");
++			i--;
++		}
++
++		/* Printable character */
++		else if (i < 53 && (c >= 0x20 && c <= 0x7E)) {
++			printf_("*");
++			password[i++] = c;
++		}
++
++		/* Cancel */
++		else if (c == 0x03 || c == 0x18) {
++			for (; i > 0; i--)
++				printf_("\b \b");
++		}
++
++		/* Enter */
++		else if (c == 0x04 || c == 0x0a || c == 0x0b ||
++			 c == 0x0c || c == 0x0d) {
++			if (i < 8)
++				continue;
++			for (; i < 54; i++)
++				password[i] = 0x0;
++			break;
++		}
++	}
++	/* derivate and set key */
++	sha256(password, strlen(password), key);
++	for (i = 0; i < TRESOR_KDF_ITER; i++) {
++		sha256(key, 32, key_hash_);
++		sha256(key_hash_, 32, key);
++	}
++	tresor_setkey(key);
++	sha256(key, 32, key_hash_);
++	/* Reset critical memory chunks */
++	c = 0;
++	memset(password, 0, 54);
++	memset(key, 0, 32);
++	wbinvd();
++	if (resume) {
++		/* Check if key is the same as before suspending */
++		if (memcmp(key_hash, key_hash_, 32)) {
++			printf("\n\n Sorry, the key you entered is wrong or mistyped.");
++			schedule_timeout_uninterruptible(1*HZ);
++			printf_(".");
++			schedule_timeout_uninterruptible(1*HZ);
++			printf_(".");
++			schedule_timeout_uninterruptible(1*HZ);
++			goto readkey;
++		}
++	} else {
++		/* Store hash of the key and show user */
++		memcpy(key_hash, key_hash_, 32);
++		printf("\n\n Confirm key hash\t> ");
++		for (i = 0; i < 16; i++)
++			printf_("%02x ", key_hash[i]);
++		printf("\n                 \t  ");
++		for (i = 16; i < 32; i++)
++			printf_("%02x ", key_hash[i]);
++
++		/* Let user confirm correct key */
++		printf("\n\n Correct (yes/no) \t> ");
++
++		printf_("yes");
++		answer[0] = 'y'; answer[1] = 'e';
++		answer[2] = 's'; answer[3] =  0 ;
++		i = 3;
++		while (1) {
++			c = getchar();
++
++			/* Backspace */
++			if (i > 0 && (c == 0x7f || c == 0x08)) {
++				printf_("\b \b");
++				answer[--i] = 0;
++			}
++
++			/* Letter */
++			else if (i < 3 && (c >= 0x61 && c <= 0x7a)) {
++				printf_("%c", c);
++				answer[i++] = c;
++			}
++
++			/* Cancel */
++			else if (c == 0x03 || c == 0x18) {
++				for (; i > 0; i--)
++					printf_("\b \b");
++			}
++
++			/* Enter */
++			else if (c == 0x04 || c == 0x0a ||
++				 c == 0x0b || c == 0x0c || c == 0x0d) {
++				answer[i] = 0;
++				if (!strcmp(answer, "no"))
++					goto readkey;
++				else if (!strcmp(answer, "yes"))
++					break;
++				continue;
++			}
++		}
++	}
++
++	/* read some key strokes */
++	printf("\n\n");
++
++	for (i = 0; i < TRESOR_RANDOM_CHARS; i++) {
++		progress = (i * 40) / TRESOR_RANDOM_CHARS;
++
++		printf_("\r Press or hold any key \t[");
++		for (j = 0; j < progress - 1; j++)
++			printf_("=");
++		if (progress)
++			printf_(">");
++		for (j += 2; j < 40; j++)
++			printf_(" ");
++		printf_("]  %d%%", ((i + 1) * 100) / TRESOR_RANDOM_CHARS);
++
++		getchar();
++	}
++
++	/* restore terminal */
++	if (resume)
++		cls();
++	else
++		printf("\n\n");
++
++	termios.c_lflag |= (ICANON | ECHO);
++	sys_ioctl(term_fd, TCSETSF, (long)&termios);
++
++	if (resume)
++		cursor_disable();
++	else
++		cursor_reset();
++
++	/* clean up */
++	sys_close(term_fd);
++	set_fs(ofs);
++	return 0;
++}
++#endif
++
++#ifdef CONFIG_CRYPTO_TRESOR_SYSFS
++#ifndef CONFIG_CRYPTO_MANAGER_DISABLE_TESTS
++/*
++ * Functions to lock or unlock the tresor tests in the testmanager
++ */
++static ssize_t lock_show(struct kobject *kobj, struct kobj_attribute *attr,
++			 char *buf)
++{
++	return sprintf(buf, "%d\n", tresor_lock_status());
++}
++
++static ssize_t lock_store(struct kobject *kobj, struct kobj_attribute *attr,
++			  const char *buf, size_t count)
++{
++	int val = -1;
++
++	if (sscanf(buf, "%d", &val) != 1)
++		return -EINVAL;
++
++	if (val == 1)
++		tresor_lock_tests();
++	else if (val == 0)
++		tresor_unlock_tests();
++	else
++		return -EINVAL;
++
++	return count;
++}
++
++static struct kobj_attribute lock_attribute =
++	__ATTR(lock, 0600, lock_show, lock_store);
++#endif
++
++
++/*
++ * Show the SHA256 hash of the key currently in use
++ */
++static ssize_t hash_show(struct kobject *kobj, struct kobj_attribute *attr,
++			 char *buf)
++{
++	ssize_t ret = 0;
++	unsigned int i;
++
++	ret = sprintf(&buf[ret], "Key hash:\n");
++	for (i = 0; i < 16; i++)
++		ret += sprintf(&buf[ret], "%02x ", key_hash[i]);
++	ret += sprintf(&buf[ret], "\n");
++	for (i = 16; i < 32; i++)
++		ret += sprintf(&buf[ret], "%02x ", key_hash[i]);
++	ret += sprintf(&buf[ret], "\n");
++
++	return ret;
++}
++
++/*
++ * Set the key using key derivation with SHA256
++ */
++static ssize_t password_store(struct kobject *kobj, struct kobj_attribute *attr,
++			      const char *buf, size_t count)
++{
++	unsigned char password[54], key[32];
++	unsigned int i;
++
++	memcpy(password, buf, 54);
++	password[53] = '\0';
++
++	/* derivate and set key */
++	sha256(password, strlen(password), key);
++	for (i = 0; i < TRESOR_KDF_ITER; i++) {
++		sha256(key, 32, key_hash);
++		sha256(key_hash, 32, key);
++	}
++	tresor_setkey(key);
++	sha256(key, 32, key_hash);
++	/* Reset critical memory chunks */
++	memset(password, 0, 54);
++	memset(key, 0, 32);
++
++	/* Reset the input buffer (ugly hack) */
++	memset((char *)buf, 0, count);
++
++	return count;
++}
++
++static struct kobj_attribute password_attribute =
++	__ATTR(password, 0600, hash_show, password_store);
++
++
++/*
++ * Set the key directly using hex values
++ */
++static ssize_t key_store(struct kobject *kobj, struct kobj_attribute *attr,
++			 const char *buf, size_t count)
++{
++	uint8_t key[16];
++
++	if (count < 32 || hex2bin(key, buf, 16) < 0)
++		return -EINVAL;
++
++	tresor_setkey(key);
++	sha256(key, 16, key_hash);
++	memset(key, 0, 16);
++
++	/* Reset the input buffer (ugly hack) */
++	memset((char *)buf, 0, count);
++
++	return count;
++}
++
++static struct kobj_attribute key_attribute =
++	__ATTR(key, 0600, hash_show, key_store);
++
++
++static struct attribute *attrs[] = {
++#ifndef CONFIG_CRYPTO_MANAGER_DISABLE_TESTS
++	&lock_attribute.attr,
++#endif
++	&password_attribute.attr,
++	&key_attribute.attr,
++	NULL
++};
++
++static struct attribute_group attr_group = {
++	.attrs = attrs,
++};
++
++static struct kobject *tresor_kobj;
++
++
++static int __init tresor_init(void)
++{
++	int ret;
++
++	tresor_kobj = kobject_create_and_add("tresor", kernel_kobj);
++	if (!tresor_kobj)
++		return -ENOMEM;
++
++	ret = sysfs_create_group(tresor_kobj, &attr_group);
++	if (ret)
++		kobject_put(tresor_kobj);
++
++	return ret;
++}
++
++static void __exit tresor_fini(void)
++{
++	kobject_put(tresor_kobj);
++}
++
++module_init(tresor_init);
++module_exit(tresor_fini);
++#endif
+diff --git a/arch/x86/include/asm/debugreg.h b/arch/x86/include/asm/debugreg.h
+index 12cb66f..0587ac0 100644
+--- a/arch/x86/include/asm/debugreg.h
++++ b/arch/x86/include/asm/debugreg.h
+@@ -21,6 +21,10 @@ static inline unsigned long native_get_debugreg(int regno)
+ {
+ 	unsigned long val = 0;	/* Damn you, gcc! */
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++	return val; /* don't read from dbg regs */
++#endif
++
+ 	switch (regno) {
+ 	case 0:
+ 		asm("mov %%db0, %0" :"=r" (val));
+@@ -48,6 +52,10 @@ static inline unsigned long native_get_debugreg(int regno)
+ 
+ static inline void native_set_debugreg(int regno, unsigned long value)
+ {
++#ifdef CONFIG_CRYPTO_TRESOR
++	return; /* don't set dbg regs */
++#endif
++
+ 	switch (regno) {
+ 	case 0:
+ 		asm("mov %0, %%db0"	::"r" (value));
+diff --git a/arch/x86/include/asm/hw_breakpoint.h b/arch/x86/include/asm/hw_breakpoint.h
+index 6c98be8..a244a11 100644
+--- a/arch/x86/include/asm/hw_breakpoint.h
++++ b/arch/x86/include/asm/hw_breakpoint.h
+@@ -41,7 +41,11 @@ struct arch_hw_breakpoint {
+ #define X86_BREAKPOINT_RW	0x83
+ 
+ /* Total number of available HW breakpoint registers */
++#ifdef CONFIG_CRYPTO_TRESOR
++#define HBP_NUM 0 /* forge number of hardware breakpoint registers */
++#else
+ #define HBP_NUM 4
++#endif
+ 
+ static inline int hw_breakpoint_slots(int type)
+ {
+ diff --git a/arch/x86/include/asm/processor.h b/arch/x86/include/asm/processor.h
+index 9264476..5a1f594 100644
+--- a/arch/x86/include/asm/processor.h
++++ b/arch/x86/include/asm/processor.h
+@@ -38,7 +38,11 @@ struct vm86;
+  */
+ #define NET_IP_ALIGN	0
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++#define HBP_NUM 0 /* forge number of hardware breakpoint registers */
++#else
+ #define HBP_NUM 4
++#endif
+ /*
+  * Default implementation of macro that returns current
+  * instruction pointer ("program counter").
+diff --git a/arch/x86/kernel/ptrace.c b/arch/x86/kernel/ptrace.c
+index 32e9d9c..3ddbdc2 100644
+--- a/arch/x86/kernel/ptrace.c
++++ b/arch/x86/kernel/ptrace.c
+@@ -683,6 +683,10 @@ static unsigned long ptrace_get_debugreg(struct task_struct *tsk, int n)
+ 	struct thread_struct *thread = &tsk->thread;
+ 	unsigned long val = 0;
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++	return val;
++#endif
++
+ 	if (n < HBP_NUM) {
+ 		struct perf_event *bp = thread->ptrace_bps[n];
+ 
+@@ -703,6 +707,10 @@ static int ptrace_set_breakpoint_addr(struct task_struct *tsk, int nr,
+ 	struct perf_event *bp = t->ptrace_bps[nr];
+ 	int err = 0;
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++    return -EBUSY;
++#endif
++
+ 	if (!bp) {
+ 		/*
+ 		 * Put stub len and type to create an inactive but correct bp.
+@@ -741,6 +749,15 @@ static int ptrace_set_debugreg(struct task_struct *tsk, int n,
+ 	struct thread_struct *thread = &tsk->thread;
+ 	/* There are no DR4 or DR5 registers */
+ 	int rc = -EIO;
++	
++#ifdef CONFIG_CRYPTO_TRESOR
++    if (n == 4 || n == 5)
++        return -EIO;
++    else if (n == 6 || n == 7)
++        return -EPERM;
++    else
++        return -EBUSY;
++#endif
+ 
+ 	if (n < HBP_NUM) {
+ 		rc = ptrace_set_breakpoint_addr(tsk, n, val);
+diff --git a/crypto/Kconfig b/crypto/Kconfig
+index 1d33beb..d09085c 100644
+--- a/crypto/Kconfig
++++ b/crypto/Kconfig
+@@ -884,6 +884,77 @@ config CRYPTO_AES_NI_INTEL
+ 	  ECB, CBC, LRW, PCBC, XTS. The 64 bit version has additional
+ 	  acceleration for CTR.
+
++config CRYPTO_TRESOR
++	bool "AES-128 cipher, cold boot resistant (TRESOR)"
++	depends on X86
++	select CRYPTO_AES
++	select CRYPTO_ALGAPI
++	select CRYPTO_MANAGER
++	select CRYPTO_MANAGER2
++	default n
++	help
++
++	  TRESOR Runs Encryption Securely Outside RAM
++
++	  Secure AES-128 implementation which is resistant against cold boot
++	  attacks as described in http://citp.princeton.edu/memory/.
++
++	  The idea behind this implementation is to store the secret key
++	  inside CPU registers rather than in RAM. All computations take
++	  place only on registers, i.e., no AES state is ever going to RAM.
++
++	  In particular, the debugging registers of the x86 architecture
++	  are misused as secure key storage. For debugging, the kernel uses
++	  software breakpoints only, no hardware breakpoints.
++
++	  The supported key size is 128 bits on 32-bit systems (no support
++	  for AES-192 and AES-256).
++
++	  If you have another CPU, say N. If unsure, say N.
++
++if CRYPTO_TRESOR
++
++config CRYPTO_TRESOR_PROMPT
++	bool "TRESOR Startup Prompt"
++	depends on CRYPTO_TRESOR
++	default y if CRYPTO_TRESOR
++	help
++	  Display a prompt at startup and after suspend to read the key
++	  which should be used for cold boot resistant encryption.
++
++	  Either CRYPTO_TRESOR_PROMPT or CRYPTO_TRESOR_SYSFS must be selected.
++
++comment "Disable SUSPEND & HIBERNATION to allow TRESOR_SYSFS"
++	depends on CRYPTO_TRESOR && (SUSPEND || HIBERNATION)
++
++config CRYPTO_TRESOR_SYSFS
++	bool "TRESOR Sysfs interface"
++	depends on CRYPTO_TRESOR && !SUSPEND && !HIBERNATION
++	default n
++	help
++	  Make the key for cold boot resistant encryption accessible via
++	  sysfs. With this option the AES key be set directly as well.
++
++	  Either CRYPTO_TRESOR_PROMPT or CRYPTO_TRESOR_SYSFS must be selected.
++
++	  Attention: This option is not compatible with SUSPEND or HIBERNATION.
++
++endif	# if CRYPTO_TRESOR
++
+ config CRYPTO_AES_SPARC64
+ 	tristate "AES cipher algorithms (SPARC64)"
+ 	depends on SPARC64
+diff --git a/crypto/testmgr.c b/crypto/testmgr.c
+index a2ca743..423ed4b 100644
+--- a/crypto/testmgr.c
++++ b/crypto/testmgr.c
+@@ -28,6 +28,9 @@
+ #include <linux/string.h>
+ #include <crypto/rng.h>
+ #include <crypto/drbg.h>
++#ifdef CONFIG_CRYPTO_TRESOR
++#include <crypto/tresor.h>
++#endif
+ 
+ #include "internal.h"
+ 
+@@ -126,6 +129,20 @@ struct alg_test_desc {
+ 
+ static unsigned int IDX[8] = { IDX1, IDX2, IDX3, IDX4, IDX5, IDX6, IDX7, IDX8 };
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++/* Prevent the test manager from overwriting dbg regs with test keys */
++static int tresor_tests_locked = 1;
++
++void tresor_lock_tests(void) { tresor_tests_locked = 1; }
++EXPORT_SYMBOL(tresor_lock_tests);
++
++void tresor_unlock_tests(void) { tresor_tests_locked = 0; }
++EXPORT_SYMBOL(tresor_unlock_tests);
++
++int tresor_lock_status(void) { return tresor_tests_locked; }
++EXPORT_SYMBOL(tresor_lock_status);
++#endif
++
+ static void hexdump(unsigned char *buf, unsigned int len)
+ {
+ 	print_hex_dump(KERN_CONT, "", DUMP_PREFIX_OFFSET,
+@@ -992,6 +1009,15 @@ static int test_cipher(struct crypto_cipher *tfm, int enc,
+ 	else
+ 		e = "decryption";
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++	if (strstr(algo, "tresor")) {
++		if (tresor_tests_locked) {
++			ret = 0;
++			goto out;
++		}
++	}
++#endif
++
+ 	j = 0;
+ 	for (i = 0; i < tcount; i++) {
+ 		if (template[i].np)
+@@ -1010,6 +1036,11 @@ static int test_cipher(struct crypto_cipher *tfm, int enc,
+ 		if (template[i].wk)
+ 			crypto_cipher_set_flags(tfm, CRYPTO_TFM_REQ_WEAK_KEY);
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++	if (strstr(algo, "tresor"))
++		tresor_setkey(template[i].key);
++#endif
++
+ 		ret = crypto_cipher_setkey(tfm, template[i].key,
+ 					   template[i].klen);
+ 		if (!ret == template[i].fail) {
+@@ -1096,6 +1127,13 @@ static int __test_skcipher(struct crypto_skcipher *tfm, int enc,
+ 	skcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+ 				      tcrypt_complete, &result);
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++	if (tresor_tests_locked) {
++		ret = 0;
++		goto out;
++	}
++#endif
++
+ 	j = 0;
+ 	for (i = 0; i < tcount; i++) {
+ 		if (template[i].np && !template[i].also_non_np)
+@@ -1119,6 +1157,11 @@ static int __test_skcipher(struct crypto_skcipher *tfm, int enc,
+ 		if (template[i].wk)
+ 			crypto_skcipher_set_flags(tfm,
+ 						  CRYPTO_TFM_REQ_WEAK_KEY);
++		
++#ifdef CONFIG_CRYPTO_TRESOR
++	if (strstr(algo, "tresor"))
++		tresor_setkey(template[i].key);
++#endif
+ 
+ 		ret = crypto_skcipher_setkey(tfm, template[i].key,
+ 					     template[i].klen);
+@@ -1198,6 +1241,11 @@ static int __test_skcipher(struct crypto_skcipher *tfm, int enc,
+ 			crypto_skcipher_set_flags(tfm,
+ 						  CRYPTO_TFM_REQ_WEAK_KEY);
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++	if (strstr(algo, "tresor"))
++		tresor_setkey(template[i].key);
++#endif
++
+ 		ret = crypto_skcipher_setkey(tfm, template[i].key,
+ 					     template[i].klen);
+ 		if (!ret == template[i].fail) {
+@@ -1822,6 +1870,13 @@ static int do_test_rsa(struct crypto_akcipher *tfm,
+ 	akcipher_request_set_callback(req, CRYPTO_TFM_REQ_MAY_BACKLOG,
+ 				      tcrypt_complete, &result);
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++	if (tresor_tests_locked) {
++		ret = 0;
++		goto out;
++	}
++#endif
++
+ 	/* Run RSA encrypt - c = m^e mod n;*/
+ 	err = wait_async_op(&result, crypto_akcipher_encrypt(req));
+ 	if (err) {
+@@ -2411,6 +2466,23 @@ static const struct alg_test_desc alg_test_descs[] = {
+ 			}
+ 		}
+ 	}, {
++#ifdef CONFIG_CRYPTO_TRESOR
++		.alg = "cbc(tresor)",
++		.test = alg_test_skcipher,
++		.suite = {
++			.cipher = {
++				.enc = {
++					.vecs = aes_cbc_enc_tv_template,
++					.count = AES_CBC_ENC_TEST_VECTORS
++				},
++				.dec = {
++					.vecs = aes_cbc_dec_tv_template,
++					.count = AES_CBC_DEC_TEST_VECTORS
++				}
++			}
++		}
++	}, {
++#endif
+ 		.alg = "cbc(twofish)",
+ 		.test = alg_test_skcipher,
+ 		.suite = {
+@@ -3108,6 +3180,23 @@ static const struct alg_test_desc alg_test_descs[] = {
+ 			}
+ 		}
+ 	}, {
++#ifdef CONFIG_CRYPTO_TRESOR
++		.alg = "ecb(tresor)",
++		.test = alg_test_skcipher,
++		.suite = {
++			.cipher = {
++				.enc = {
++					.vecs = aes_enc_tv_template,
++					.count = AES_ENC_TEST_VECTORS
++				},
++				.dec = {
++					.vecs = aes_dec_tv_template,
++					.count = AES_DEC_TEST_VECTORS
++				}
++			}
++		}
++	}, {
++#endif
+ 		.alg = "ecb(twofish)",
+ 		.test = alg_test_skcipher,
+ 		.suite = {
+--- a/drivers/tty/vt/vt.c
++++ b/drivers/tty/vt/vt.c
+@@ -103,6 +103,10 @@
+ #include <linux/kdb.h>
+ #include <linux/ctype.h>
+ 
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++#include <crypto/tresor.h>
++#endif
++
+ #define MAX_NR_CON_DRIVER 16
+ 
+ #define CON_DRIVER_FLAG_MODULE 1
+@@ -237,6 +241,17 @@ enum {
+ 	blank_vesa_wait,
+ };
+ 
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++/* Dont allow to switch console while reading TRESOR key on wakeup */
++static int dont_switch_console;
++
++void tresor_dont_switch_console(dont_switch)
++{
++	dont_switch_console = dont_switch;
++}
++#endif
++
++
+ /*
+  * /sys/class/tty/tty0/
+  *
+@@ -2439,6 +2454,11 @@ rescan_last_byte:
+  */
+ static void console_callback(struct work_struct *ignored)
+ {
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++	if (dont_switch_console)
++		return;
++#endif
++
+ 	console_lock();
+ 
+ 	if (want_console >= 0) {
+diff --git a/include/crypto/tresor.h b/include/crypto/tresor.h
+new file mode 100644
+index 0000000..61c5657
+--- /dev/null
++++ b/include/crypto/tresor.h
+@@ -0,0 +1,35 @@
++#ifndef _CRYPTO_TRESOR_H
++#define _CRYPTO_TRESOR_H
++
++#include <linux/crypto.h>
++#include <linux/types.h>
++
++/* number of iterations for key derivation */
++#define TRESOR_KDF_ITER 2000
++
++/* number of chars to clear memory */
++#define TRESOR_RANDOM_CHARS 4096
++
++/* TRESOR core functionality (enc, dec, setkey) */
++void tresor_encrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src);
++void tresor_decrypt(struct crypto_tfm *tfm, u8 *dst, const u8 *src);
++void tresor_setkey(const u8 *in_key);
++bool tresor_capable(void);
++
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++/* Password prompt */
++int  tresor_readkey(const char *device, int resume);
++
++/* Key prompt on wakeup after suspend2ram */
++void tresor_dont_switch_console(int dont_switch);
++void tresor_thaw_processes(void);
++#endif
++
++#ifndef CONFIG_CRYPTO_MANAGER_DISABLE_TESTS
++/* Prevent the test manager from overwriting dbg regs with test key */
++void tresor_unlock_tests(void);
++void tresor_lock_tests(void);
++int tresor_lock_status(void);
++#endif
++
++#endif /* _CRYPTO_TRESOR_H */
+diff --git a/init/main.c b/init/main.c
+index b286730..39ed365 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -80,6 +80,11 @@
+ #include <asm/smp.h>
+ #endif
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++#include <crypto/tresor.h>
++#include <linux/crypto.h>
++#endif
++
+ static int kernel_init(void *);
+ 
+ extern void init_IRQ(void);
+@@ -1026,6 +1030,22 @@ static noinline void __init kernel_init_freeable(void)
+ 		prepare_namespace();
+ 	}
+ 
++#ifdef CONFIG_CRYPTO_TRESOR
++#ifndef CONFIG_CRYPTO_MANAGER_DISABLE_TESTS
++	/* Run TRESOR tests */
++	tresor_unlock_tests();
++	alg_test("ecb(tresor)", "ecb(tresor)", 0, 0);
++	alg_test("cbc(tresor)", "cbc(tresor)", 0, 0);
++	tresor_lock_tests();
++#endif
++
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++	/* Prompt user for key */
++	if (tresor_readkey("/dev/console", 0) < 0)
++		panic("Could not prompt for TRESOR key.\n");
++#endif
++#endif
++
+ 	/*
+ 	 * Ok, we have completed the initial bootup, and
+ 	 * we're essentially up and running. Get rid of the
+diff --git a/kernel/power/process.c b/kernel/power/process.c
+index df058be..a2cfe7f 100644
+--- a/kernel/power/process.c
++++ b/kernel/power/process.c
+@@ -18,6 +18,9 @@
+ #include <linux/workqueue.h>
+ #include <linux/kmod.h>
+ #include <trace/events/power.h>
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++#include <crypto/tresor.h>
++#endif
+ 
+ /* 
+  * Timeout for stopping processes
+@@ -233,3 +236,39 @@ void thaw_kernel_threads(void)
+ 	schedule();
+ 	pr_cont("done.\n");
+ }
++
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++/* Wake up kernel tasks */
++static void thaw_kernel_tasks(void)
++{
++	struct task_struct *g, *p;
++
++	if (pm_freezing)
++		atomic_dec(&system_freezing_cnt);
++	pm_freezing = false;
++	pm_nosig_freezing = false;
++
++	read_lock(&tasklist_lock);
++	do_each_thread(g, p) {
++		if (p->flags & PF_KTHREAD)
++			__thaw_task(p);
++	} while_each_thread(g, p);
++	read_unlock(&tasklist_lock);
++}
++
++/* Prompt the user to enter a password before waking up userland tasks */
++void tresor_thaw_processes(void)
++{
++	/* wake kernel tasks */
++	thaw_kernel_tasks();
++
++	/* prompt user for password */
++	tresor_dont_switch_console(true);
++	if (tresor_readkey("/dev/tty0", 1) < 0)
++		panic("Could not prompt for TRESOR key.\n");
++	tresor_dont_switch_console(false);
++	
++	/* wake userland tasks */
++	thaw_processes();
++}
++#endif
+diff --git a/kernel/power/suspend.c b/kernel/power/suspend.c
+index 5b70d64..51e8d97 100644
+--- a/kernel/power/suspend.c
++++ b/kernel/power/suspend.c
+@@ -29,6 +29,9 @@
+ #include <trace/events/power.h>
+ #include <linux/compiler.h>
+ #include <linux/moduleparam.h>
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++#include <crypto/tresor.h>
++#endif
+ 
+ #include "power.h"
+ 
+@@ -452,7 +455,12 @@ int suspend_devices_and_enter(suspend_state_t state)
+  */
+ static void suspend_finish(void)
+ {
++#ifdef CONFIG_CRYPTO_TRESOR_PROMPT
++	/* read key before thawing processes */
++	tresor_thaw_processes();
++#else
+ 	suspend_thaw_processes();
++#endif
+ 	pm_notifier_call_chain(PM_POST_SUSPEND);
+ 	pm_restore_console();
+ }
+ 

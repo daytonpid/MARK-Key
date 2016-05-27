@@ -31,7 +31,7 @@ index b9b912a..e8598a2 100644
  ghash-clmulni-intel-y := ghash-clmulni-intel_asm.o ghash-clmulni-intel_glue.o
  sha1-ssse3-y := sha1_ssse3_asm.o sha1_ssse3_glue.o
  poly1305-x86_64-y := poly1305-sse2-x86_64.o poly1305_glue.o
-diff --git a/linux/arch/x86/crypto/tresor_asm.S b/arch/x86/crypto/tresor_asm.S
+diff --git a/arch/x86/crypto/tresor_asm.S b/arch/x86/crypto/tresor_asm.S
 new file mode 100644
 index 0000000..358bb72
 --- /dev/null
@@ -391,7 +391,7 @@ index 0000000..358bb72
 +	not_capable:
 +	mov	$0,%eax
 +	retq
-diff --git a/linux/arch/x86/crypto/tresor_glue.c b/arch/x86/crypto/tresor_glue.c
+diff --git a/arch/x86/crypto/tresor_glue.c b/arch/x86/crypto/tresor_glue.c
 new file mode 100644
 index 0000000..9808a45
 --- /dev/null
@@ -595,7 +595,7 @@ index 0000000..9808a45
 +
 +/* Support TRESOR testing module  */
 +EXPORT_SYMBOL(tresor_setkey);
-diff --git a/linux/arch/x86/crypto/tresor_key.c b/arch/x86/crypto/tresor_key.c
+diff --git a/arch/x86/crypto/tresor_key.c b/arch/x86/crypto/tresor_key.c
 new file mode 100644
 index 0000000..f3fc939
 --- /dev/null
@@ -1667,7 +1667,7 @@ index 3e3c757..f6002d4 100644
  	console_lock();
  
  	if (want_console >= 0) {
-diff --git a/linux/include/crypto/tresor.h b/include/crypto/tresor.h
+diff --git a/include/crypto/tresor.h b/include/crypto/tresor.h
 new file mode 100644
 index 0000000..61c5657
 --- /dev/null
@@ -1816,3 +1816,4 @@ index 5b70d64..51e8d97 100644
  	pm_notifier_call_chain(PM_POST_SUSPEND);
  	pm_restore_console();
  }
+ 
